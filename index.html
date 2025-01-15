@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="description" content="GUM -> WebCodecs -> WebCrypto -> MSE/EME-for-WebCodecs">
+    <meta name="keywords" content="eme, mse, webcodecs, eme-for-webcodecs, mse-for-webcodecs">
+    <title>WebCodecs + MSE/EME-for-WebCodecs demo</title>
+</head>
+
+<body>
+<div style="height:75vh;width:95vw">
+    <video height="100%" width="100%" controls autoplay id="video"></video>
+</div>
+<br>
+<button id="start-stop-btn">Start</button>
+<br>
+<a href="https://github.com/vitaly-castLabs/eme-for-webcodecs" target=”_blank” style="position:fixed;bottom:8px;left:8px">GitHub</a>
+<script>
+
+const video = document.getElementById('video')
+const startBtn = document.getElementById('start-stop-btn')
+
+const testKey = new Uint8Array([0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c])
+const testKeyId = new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01])
+const testIv = new Uint8Array([0xd5, 0xfb, 0xd6, 0xb8, 0x2e, 0xd9, 0x3e, 0x4e, 0xf9, 0x8a, 0xe4, 0x09, 0x31, 0xee, 0x33, 0xb7])
+
+let cryptoKey = null
+
+let state = 'stopped'
+
+let queue = []
+
+let mediaSource = null
+let sourceBuffer = null
+function setupMse() {
+    mediaSource = new MediaSource()
+    video.src = URL.createObjectURL(mediaSource)
+    mediaSource.addEventListener('sourceopen', () => {
+        URL.revokeObjectURL(video.src)
+        sourceBuffer = mediaSource.addSourceBuffer({videoConfig: {codec: 'vp09.00.10.08', encryptionScheme: 'cenc'}})
+    })
+}
+
+async function setupEme() {
+    video.addEventListener('encrypted', (event) => {
+        console.log('Encrypted!')
+
+        const initData = event.initData
+        const keySystem = 'org.w3.clearkey'
+        const config = [{
+            initDataTypes: ['keyids'],
+            videoCapabilities: [{contentType: 'video/mp4; codecs="vp09.00.10.08"'}]
+        }]
+
+        navigator.requestMediaKeySystemAccess(keySystem, config).then((keySystemAccess) => {
+            return keySystemAccess.createMediaKeys()
+        }).then((mediaKeys) => {
+            return video.setMediaKeys(mediaKeys)
+        }).then(() => {
+            const keySession = video.mediaKeys.createSession()
+            keySession.addEventListener('message', (event) => {
+                const request = JSON.parse(new TextDecoder().decode(event.message))
+                const license = {
+                    keys: [{
+                        kty: 'oct',
+                        alg: 'A128KW',
+                        kid: request.kids[0],
+                        k: testKey
+                    }]
+                }
+                const licenseBuffer = new TextEncoder().encode(JSON.stringify(license))
+                keySession.update(licenseBuffer)
+            })
+            keySession.generateRequest(event.initDataType, initData)
+        }).catch((error) => {
+            alert(`Failed to initialize ClearKey DRM: ${error}`)
+        })
+    })
+}
+
+let startTimestamp = -1
+async function handleChunk(chunk, metadata) {
+    const encodedFrame = new ArrayBuffer(chunk.byteLength)
+    chunk.copyTo(encodedFrame)
+    let encryptedChunkData = await window.crypto.subtle.encrypt(
+        {name: 'AES-CTR', counter: testIv, length: 128},
+        cryptoKey,
+        encodedFrame)
+
+    if (startTimestamp < 0)
+        startTimestamp = chunk.timestamp
+
+    const encryptedChunk = new EncodedVideoChunk({
+        type: chunk.type,
+        timestamp: chunk.timestamp - startTimestamp,
+        duration: chunk.duration,   // this is always 0
+        data: encryptedChunkData,
+        decryptConfig: {
+            encryptionScheme: 'cenc',
+            keyId: testKeyId,
+            initializationVector: testIv,
+            subsampleLayout: [{clearBytes: 0, cypherBytes: encryptedChunkData.byteLength}]
+        }
+    })
+    queue.push(encryptedChunk)
+
+    while (sourceBuffer && !sourceBuffer.updating && queue.length > 0) {
+        const encryptedFrame = queue.shift()
+        if (encryptedFrame.type === 'key')
+            console.log('Appending key frame,', encryptedFrame.byteLength, 'bytes, ts:', encryptedFrame.timestamp / 1_000_000)
+
+        sourceBuffer.appendEncodedChunks(encryptedFrame)
+    }
+}
+
+async function startStop() {
+    if (state === 'running') {
+        state = 'stopped'
+        return
+    }
+
+    if (!cryptoKey)
+        cryptoKey = await crypto.subtle.importKey('raw', testKey.buffer, 'AES-CTR', false, ['encrypt', 'decrypt'])
+
+    setupMse()
+    await setupEme()
+
+    let stream = null
+    let trackProcessor = null
+    let videoEncoder = null
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {frameRate: {ideal: 30}}
+        })
+        trackProcessor = new MediaStreamTrackProcessor({track: stream.getVideoTracks()[0]})
+        videoEncoder = new VideoEncoder({
+            output: handleChunk,
+            error: e => {alert(e.message)}
+        })
+    }
+    catch (e) {
+        stream?.getTracks().forEach(t => t.stop())
+        alert(e.message)
+        return
+    }
+
+    if (!videoEncoder)
+        return
+
+    const reader = trackProcessor.readable.getReader()
+
+    state = 'running'
+    startBtn.textContent = 'Stop'
+
+    video.play().then(() => {}).catch(() => {})
+
+    let frameCount = 0
+    while (state === 'running') {
+        const { done, value } = await reader.read()
+
+        if (done)
+            break
+
+        if (videoEncoder.state === 'unconfigured') {
+            const config = {
+                //codec: 'avc1.420032',
+                codec: 'vp09.00.10.08',
+                width: value.codedWidth,
+                height: value.codedHeight,
+                latencyMode: 'realtime',
+                //avc: {format: 'annexb'}
+            }
+            console.log('Video encoder config:', config)
+            videoEncoder.configure(config)
+        }
+
+        // enforce a key frame every 10s
+        videoEncoder.encode(value, {keyFrame: !(frameCount++ % 300)})
+        value.close()
+    }
+
+    video.src = ''
+    startTimestamp = -1
+    startBtn.textContent = 'Start'
+
+    stream?.getTracks().forEach(t => t.stop())
+}
+
+window.onload = function() {
+    if (!SourceBuffer.prototype.hasOwnProperty('appendEncodedChunks')) {
+        alert('appendEncodedChunks is not supported by the browser! Use Chrome and make sure Experimental Web Platform features are enabled in chrome://flags')
+        return
+    }
+
+    // Safari and Firefox fallback, lifted from https://jan-ivar.github.io/polyfills/mediastreamtrackprocessor.js
+    if (!self.MediaStreamTrackProcessor) {
+        self.MediaStreamTrackProcessor = class MediaStreamTrackProcessor {
+            constructor({track}) {
+                const video = document.createElement('video')
+                video.srcObject = new MediaStream([track])
+                const loaded = Promise.all([
+                    video.play(),
+                    new Promise(r => video.onloadedmetadata = r)
+                ])
+
+                this.track = track
+                const interval = 1000 / track.getSettings().frameRate
+                let canvas, ctx, t1 = performance.now()
+
+                this.readable = new ReadableStream({
+                    async start(controller) {
+                        await loaded
+                        canvas = new OffscreenCanvas(video.videoWidth, video.videoHeight)
+                        ctx = canvas.getContext('2d', {desynchronized: true})
+                    },
+                    async pull(controller) {
+                        while (performance.now() - t1 < interval)
+                            await new Promise(r => requestAnimationFrame(r))
+
+                        t1 = performance.now()
+                        ctx.drawImage(video, 0, 0)
+                        controller.enqueue(new VideoFrame(canvas, {timestamp: t1 * 1000}))
+                    }
+                })
+            }
+        }
+    }
+
+    startBtn.addEventListener('click', startStop, false)
+    video.playoutDelayHint = video.jitterBufferDelayHint = video.jitterBufferTarget = 0
+}
+</script>
+</body>
+</html>
