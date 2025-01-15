@@ -37,6 +37,8 @@ function setupMse() {
     mediaSource = new MediaSource()
     video.src = URL.createObjectURL(mediaSource)
     mediaSource.addEventListener('sourceopen', () => {
+        mediaSource.duration = Number.POSITIVE_INFINITY    // this is a Safari thing, adding just in case
+        
         URL.revokeObjectURL(video.src)
         sourceBuffer = mediaSource.addSourceBuffer({videoConfig: {codec: 'vp09.00.10.08', encryptionScheme: 'cenc'}})
     })
