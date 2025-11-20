@@ -13,6 +13,21 @@
     <video height="100%" width="100%" controls autoplay id="video"></video>
 </div>
 <br>
+<table>
+    <tr>
+        <td style="text-align:right">Codec:</td>
+        <td style="text-align:left">
+            <select style="width:fit-content" id="codec-slct">
+                <option>VP8</option>
+                <option>VP9</option>
+                <option selected>AV1</option>
+                <option>H264</option>
+                <option>HEVC</option>
+            </select>
+        </td>
+    </tr>
+</table>
+<br>
 <button id="start-stop-btn">Start</button>
 <br>
 <a href="https://github.com/vitaly-castLabs/eme-for-webcodecs" target=”_blank” style="position:fixed;bottom:8px;left:8px">GitHub</a>
@@ -20,6 +35,15 @@
 
 const video = document.getElementById('video')
 const startBtn = document.getElementById('start-stop-btn')
+const codecSlct = document.getElementById('codec-slct')
+
+const codecMap = {
+    VP8: 'vp8',
+    VP9: 'vp09.00.10.08',
+    AV1: 'av01.0.05M.08',
+    H264: 'avc1.420032',
+    HEVC: 'hev1.1.6.L93.B0'
+}
 
 const testKey = new Uint8Array([0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c])
 const testKeyId = new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01])
@@ -45,17 +69,18 @@ function setupMse() {
     video.src = URL.createObjectURL(mediaSource)
     mediaSource.addEventListener('sourceopen', () => {
         mediaSource.duration = Number.POSITIVE_INFINITY    // this is a Safari thing, adding just in case
-
+        const codec = codecMap[codecSlct.value]
         URL.revokeObjectURL(video.src)
-        sourceBuffer = mediaSource.addSourceBuffer({videoConfig: {codec: 'vp09.00.10.08', encryptionScheme: 'cenc'}})
+        sourceBuffer = mediaSource.addSourceBuffer({videoConfig: {codec, encryptionScheme: 'cenc'}})
     })
 }
 
 async function setupEme() {
     const keySystem = 'org.w3.clearkey'
+    const codec = codecMap[codecSlct.value]
     const config = [{
         initDataTypes: ['keyids'],
-        videoCapabilities: [{contentType: 'video/mp4; codecs="vp09.00.10.08"'}]
+        videoCapabilities: [{contentType: `video/mp4;codecs="${codec}"`, encryptionScheme: 'cenc'}]
     }]
 
     const keySystemAccess = await navigator.requestMediaKeySystemAccess(keySystem, config)
@@ -100,7 +125,7 @@ async function handleChunk(chunk, metadata) {
         timestamp: chunk.timestamp - startTimestamp,
         // just put some arbitrary large value here, apparently the most important thing is that
         // there are no time gaps, when timestamp and duration are added up (overlapping seems to
-        // be ok with Chrome)
+        // be ok with Chrome).
         duration: 1_000_000, //chunk.duration,   // this is always 0
         data: encryptedChunkData,
         decryptConfig: {
@@ -147,7 +172,7 @@ async function startStop() {
     try {
         stream = await navigator.mediaDevices.getUserMedia({
             audio: false,
-            video: {frameRate: {ideal: 10}}
+            video: {width: {ideal: 640}, height: {ideal: 480}, frameRate: {ideal: 10}}
         })
         trackProcessor = new MediaStreamTrackProcessor({track: stream.getVideoTracks()[0]})
         videoEncoder = new VideoEncoder({
@@ -171,7 +196,8 @@ async function startStop() {
 
     video.play().then(() => {}).catch(() => {})
 
-    let frameCount = 0
+    const keyFrameFreq = 100
+    let frameCount = keyFrameFreq + 1
     while (state === 'running') {
         const { done, value } = await reader.read()
 
@@ -179,21 +205,28 @@ async function startStop() {
             break
 
         if (videoEncoder.state === 'unconfigured') {
+            const codec = codecMap[codecSlct.value]
             const config = {
-                //codec: 'avc1.420032',
-                codec: 'vp09.00.10.08',
+                codec,
                 width: value.codedWidth,
                 height: value.codedHeight,
                 latencyMode: 'realtime',
-                //avc: {format: 'annexb'}
+                avc: {format: 'annexb'},
+                hevc: {format: 'annexb'}
             }
             console.log('Video encoder config:', config)
             videoEncoder.configure(config)
         }
 
-        // enforce a key frame every 10s
-        videoEncoder.encode(value, {keyFrame: !(frameCount++ % 300)})
+        // enforce a key frame every now and then
+        const options = {keyFrame: (frameCount > keyFrameFreq)}
+        videoEncoder.encode(value, options)
         value.close()
+
+        if (options.keyFrame)
+            frameCount = 0
+        else
+            frameCount++
     }
 
     video.src = ''
