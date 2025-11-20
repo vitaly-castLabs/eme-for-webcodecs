@@ -45,39 +45,34 @@ function setupMse() {
 }
 
 async function setupEme() {
-    video.addEventListener('encrypted', (event) => {
-        console.log('Encrypted!')
+    const keySystem = 'org.w3.clearkey'
+    const config = [{
+        initDataTypes: ['keyids'],
+        videoCapabilities: [{contentType: 'video/mp4; codecs="vp09.00.10.08"'}]
+    }]
 
-        const initData = event.initData
-        const keySystem = 'org.w3.clearkey'
-        const config = [{
-            initDataTypes: ['keyids'],
-            videoCapabilities: [{contentType: 'video/mp4; codecs="vp09.00.10.08"'}]
-        }]
-
-        navigator.requestMediaKeySystemAccess(keySystem, config).then((keySystemAccess) => {
-            return keySystemAccess.createMediaKeys()
-        }).then((mediaKeys) => {
-            return video.setMediaKeys(mediaKeys)
-        }).then(() => {
-            const keySession = video.mediaKeys.createSession()
-            keySession.addEventListener('message', (event) => {
-                const request = JSON.parse(new TextDecoder().decode(event.message))
-                const license = {
-                    keys: [{
-                        kty: 'oct',
-                        alg: 'A128KW',
-                        kid: request.kids[0],
-                        k: testKey
-                    }]
-                }
-                const licenseBuffer = new TextEncoder().encode(JSON.stringify(license))
-                keySession.update(licenseBuffer)
-            })
-            keySession.generateRequest(event.initDataType, initData)
-        }).catch((error) => {
-            alert(`Failed to initialize ClearKey DRM: ${error}`)
+    navigator.requestMediaKeySystemAccess(keySystem, config).then((keySystemAccess) => {
+        return keySystemAccess.createMediaKeys()
+    }).then((mediaKeys) => {
+        return video.setMediaKeys(mediaKeys)
+    }).then(() => {
+        const keySession = video.mediaKeys.createSession()
+        keySession.addEventListener('message', (event) => {
+            const request = JSON.parse(new TextDecoder().decode(event.message))
+            const license = {
+                keys: [{
+                    kty: 'oct',
+                    alg: 'A128KW',
+                    kid: request.kids[0],
+                    k: testKey
+                }]
+            }
+            const licenseBuffer = new TextEncoder().encode(JSON.stringify(license))
+            keySession.update(licenseBuffer)
         })
+        keySession.generateRequest(event.initDataType, initData)
+    }).catch((error) => {
+        alert(`Failed to initialize ClearKey DRM: ${error}`)
     })
 }
 
