@@ -58,33 +58,29 @@ async function setupEme() {
         videoCapabilities: [{contentType: 'video/mp4; codecs="vp09.00.10.08"'}]
     }]
 
-    try {
-        const keySystemAccess = await navigator.requestMediaKeySystemAccess(keySystem, config)
-        const mediaKeys = await keySystemAccess.createMediaKeys()
-        await video.setMediaKeys(mediaKeys)
+    const keySystemAccess = await navigator.requestMediaKeySystemAccess(keySystem, config)
+    const mediaKeys = await keySystemAccess.createMediaKeys()
+    await video.setMediaKeys(mediaKeys)
 
-        const keySession = video.mediaKeys.createSession()
-        keySession.addEventListener('message', (event) => {
-            const request = JSON.parse(new TextDecoder().decode(event.message))
-            console.log('Received license request:', request)
-            const license = {
-                keys: [{
-                    kty: 'oct',
-                    alg: 'A128KW',
-                    kid: request.kids[0],
-                    k: base64urlEncode(testKey)
-                }]
-            }
-            const licenseBuffer = new TextEncoder().encode(JSON.stringify(license))
-            event.target.update(licenseBuffer)
-        })
+    const keySession = video.mediaKeys.createSession()
+    keySession.addEventListener('message', (event) => {
+        const request = JSON.parse(new TextDecoder().decode(event.message))
+        console.log('Received license request:', request)
+        const license = {
+            keys: [{
+                kty: 'oct',
+                alg: 'A128KW',
+                kid: request.kids[0],
+                k: base64urlEncode(testKey)
+            }]
+        }
+        const licenseBuffer = new TextEncoder().encode(JSON.stringify(license))
+        event.target.update(licenseBuffer)
+    })
 
-        const encoder = new TextEncoder()
-        const initData = encoder.encode(JSON.stringify({'kids': [base64urlEncode(testKeyId)]}))
-        await keySession.generateRequest('keyids', initData)
-    } catch (error) {
-        alert(`Failed to initialize ClearKey DRM: ${error}`)
-    }
+    const encoder = new TextEncoder()
+    const initData = encoder.encode(JSON.stringify({'kids': [base64urlEncode(testKeyId)]}))
+    await keySession.generateRequest('keyids', initData)
 }
 
 let startTimestamp = -1
@@ -102,7 +98,10 @@ async function handleChunk(chunk, metadata) {
     const encryptedChunk = new EncodedVideoChunk({
         type: chunk.type,
         timestamp: chunk.timestamp - startTimestamp,
-        duration: 100_000, //chunk.duration,   // this is always 0
+        // just put some arbitrary large value here, apparently the most important thing is that
+        // there are no time gaps, when timestamp and duration are added up (overlapping seems to
+        // be ok with Chrome)
+        duration: 1_000_000, //chunk.duration,   // this is always 0
         data: encryptedChunkData,
         decryptConfig: {
             encryptionScheme: 'cenc',
@@ -131,8 +130,16 @@ async function startStop() {
     if (!cryptoKey)
         cryptoKey = await crypto.subtle.importKey('raw', testKey.buffer, 'AES-CTR', false, ['encrypt', 'decrypt'])
 
-    setupMse()
-    await setupEme()
+    try {
+        setupMse()
+        await setupEme()
+    } catch (error) {
+        alert(`Failed to initialize ClearKey DRM: ${error}`)
+        state = 'stopped'
+        startBtn.textContent = 'Start'
+        video.src = ''
+        return
+    }
 
     let stream = null
     let trackProcessor = null
