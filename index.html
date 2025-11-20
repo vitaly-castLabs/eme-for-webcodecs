@@ -33,12 +33,19 @@ let queue = []
 
 let mediaSource = null
 let sourceBuffer = null
+
+const base64urlEncode = (bytes) =>
+    btoa(String.fromCharCode(...bytes))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/g, '')
+
 function setupMse() {
     mediaSource = new MediaSource()
     video.src = URL.createObjectURL(mediaSource)
     mediaSource.addEventListener('sourceopen', () => {
         mediaSource.duration = Number.POSITIVE_INFINITY    // this is a Safari thing, adding just in case
-        
+
         URL.revokeObjectURL(video.src)
         sourceBuffer = mediaSource.addSourceBuffer({videoConfig: {codec: 'vp09.00.10.08', encryptionScheme: 'cenc'}})
     })
@@ -51,29 +58,33 @@ async function setupEme() {
         videoCapabilities: [{contentType: 'video/mp4; codecs="vp09.00.10.08"'}]
     }]
 
-    navigator.requestMediaKeySystemAccess(keySystem, config).then((keySystemAccess) => {
-        return keySystemAccess.createMediaKeys()
-    }).then((mediaKeys) => {
-        return video.setMediaKeys(mediaKeys)
-    }).then(() => {
+    try {
+        const keySystemAccess = await navigator.requestMediaKeySystemAccess(keySystem, config)
+        const mediaKeys = await keySystemAccess.createMediaKeys()
+        await video.setMediaKeys(mediaKeys)
+
         const keySession = video.mediaKeys.createSession()
         keySession.addEventListener('message', (event) => {
             const request = JSON.parse(new TextDecoder().decode(event.message))
+            console.log('Received license request:', request)
             const license = {
                 keys: [{
                     kty: 'oct',
                     alg: 'A128KW',
                     kid: request.kids[0],
-                    k: testKey
+                    k: base64urlEncode(testKey)
                 }]
             }
             const licenseBuffer = new TextEncoder().encode(JSON.stringify(license))
-            keySession.update(licenseBuffer)
+            event.target.update(licenseBuffer)
         })
-        keySession.generateRequest(event.initDataType, initData)
-    }).catch((error) => {
+
+        const encoder = new TextEncoder()
+        const initData = encoder.encode(JSON.stringify({'kids': [base64urlEncode(testKeyId)]}))
+        await keySession.generateRequest('keyids', initData)
+    } catch (error) {
         alert(`Failed to initialize ClearKey DRM: ${error}`)
-    })
+    }
 }
 
 let startTimestamp = -1
